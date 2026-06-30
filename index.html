@@ -1,0 +1,1376 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+
+  <!-- Makes "Add to Home Screen" on iPhone open this full-screen, like an app -->
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+  <meta name="apple-mobile-web-app-title" content="Time Sheet" />
+  <meta name="theme-color" content="#f5f5f4" />
+
+  <title>Time Sheet</title>
+
+  <style>
+    @media print {
+      @page { margin: 1.5cm; }
+    }
+  </style>
+
+  <!-- Tailwind, compiled in the browser - no build step -->
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <!-- React, ReactDOM, Babel (transforms the JSX below at page load) -->
+  <script crossorigin src="https://cdn.jsdelivr.net/npm/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@babel/standalone/babel.min.js"></script>
+
+  <!-- Firebase compat SDK, pinned to 9.23.0 -->
+  <script src="https://cdn.jsdelivr.net/npm/firebase@9.23.0/firebase-app-compat.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/firebase@9.23.0/firebase-auth-compat.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/firebase@9.23.0/firebase-firestore-compat.js"></script>
+
+  <!-- PDF generation, used by the download-PDF button -->
+  <script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/jspdf-autotable@3.8.3/dist/jspdf.plugin.autotable.min.js"></script>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+const { useState, useEffect, useRef } = React;
+
+// ============================================================
+// Firebase (compat SDK, loaded via <script> tags in index.html)
+// ============================================================
+var firebaseConfig = {
+  apiKey: 'AIzaSyAUiwHK9D68TDC6hNhjLq1MRbl0krQkNyw',
+  authDomain: 'timesheet-52cd3.firebaseapp.com',
+  projectId: 'timesheet-52cd3',
+  storageBucket: 'timesheet-52cd3.firebasestorage.app',
+  messagingSenderId: '718872389329',
+  appId: '1:718872389329:web:f5b00b6a9e5caf81abc7f0',
+};
+firebase.initializeApp(firebaseConfig);
+var auth = firebase.auth();
+var db = firebase.firestore();
+
+// Builds a window.storage-compatible interface (get/set by key) backed by
+// Firestore, scoped to one signed-in user's uid.
+function makeStorage(uid) {
+  return {
+    async get(key) {
+      try {
+        const snap = await db.collection('users').doc(uid).collection('timesheet').doc(key).get();
+        if (!snap.exists) return null;
+        return { key: key, value: snap.data().value };
+      } catch (e) {
+        console.error('storage.get failed', e);
+        return null;
+      }
+    },
+    async set(key, value) {
+      await db
+        .collection('users')
+        .doc(uid)
+        .collection('timesheet')
+        .doc(key)
+        .set({ value: value, updatedAt: Date.now() });
+      return { key: key, value: value };
+    },
+  };
+}
+
+// ============================================================
+// Icons - small hand-drawn replacements for lucide-react, so no
+// extra script tag or npm package is needed for icons.
+// ============================================================
+function Icon({ children, className, ...rest }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+      {...rest}
+    >
+      {children}
+    </svg>
+  );
+}
+
+function Plus(props) {
+  return (
+    <Icon {...props}>
+      <line x1="12" y1="5" x2="12" y2="19" />
+      <line x1="5" y1="12" x2="19" y2="12" />
+    </Icon>
+  );
+}
+
+function Trash2(props) {
+  return (
+    <Icon {...props}>
+      <polyline points="3 6 5 6 21 6" />
+      <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
+      <path d="M10 11v6" />
+      <path d="M14 11v6" />
+      <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
+    </Icon>
+  );
+}
+
+function ChevronLeft(props) {
+  return (
+    <Icon {...props}>
+      <polyline points="15 18 9 12 15 6" />
+    </Icon>
+  );
+}
+
+function ChevronRight(props) {
+  return (
+    <Icon {...props}>
+      <polyline points="9 18 15 12 9 6" />
+    </Icon>
+  );
+}
+
+function ChevronDown(props) {
+  return (
+    <Icon {...props}>
+      <polyline points="6 9 12 15 18 9" />
+    </Icon>
+  );
+}
+
+function Copy(props) {
+  return (
+    <Icon {...props}>
+      <rect x="9" y="9" width="13" height="13" rx="2" />
+      <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+    </Icon>
+  );
+}
+
+function Check(props) {
+  return (
+    <Icon {...props}>
+      <polyline points="20 6 9 17 4 12" />
+    </Icon>
+  );
+}
+
+function Loader2(props) {
+  return (
+    <Icon {...props}>
+      <circle cx="12" cy="12" r="9" strokeOpacity="0.25" />
+      <path d="M21 12a9 9 0 0 0-9-9" />
+    </Icon>
+  );
+}
+
+function X(props) {
+  return (
+    <Icon {...props}>
+      <line x1="18" y1="6" x2="6" y2="18" />
+      <line x1="6" y1="6" x2="18" y2="18" />
+    </Icon>
+  );
+}
+
+function Clock(props) {
+  return (
+    <Icon {...props}>
+      <circle cx="12" cy="12" r="10" />
+      <polyline points="12 6 12 12 16 14" />
+    </Icon>
+  );
+}
+
+function FileText(props) {
+  return (
+    <Icon {...props}>
+      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+      <polyline points="14 2 14 8 20 8" />
+      <line x1="16" y1="13" x2="8" y2="13" />
+      <line x1="16" y1="17" x2="8" y2="17" />
+      <line x1="10" y1="9" x2="8" y2="9" />
+    </Icon>
+  );
+}
+
+function Printer(props) {
+  return (
+    <Icon {...props}>
+      <polyline points="6 9 6 2 18 2 18 9" />
+      <path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2" />
+      <rect x="6" y="14" width="12" height="8" />
+    </Icon>
+  );
+}
+
+// ============================================================
+// Date / data helpers
+// ============================================================
+const DAY_KEYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+const DAY_LABELS = {
+  Mon: 'Monday',
+  Tue: 'Tuesday',
+  Wed: 'Wednesday',
+  Thu: 'Thursday',
+  Fri: 'Friday',
+  Sat: 'Saturday',
+};
+const DAY_OFFSET = { Mon: -6, Tue: -5, Wed: -4, Thu: -3, Fri: -2, Sat: -1 };
+
+function pad(n) {
+  return String(n).padStart(2, '0');
+}
+
+function toISODate(date) {
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}
+
+function fromISODate(iso) {
+  const [y, m, d] = iso.split('-').map(Number);
+  return new Date(y, m - 1, d);
+}
+
+function addDays(iso, n) {
+  const d = fromISODate(iso);
+  d.setDate(d.getDate() + n);
+  return toISODate(d);
+}
+
+function getDefaultWeekEnding() {
+  const today = new Date();
+  const day = today.getDay();
+  const untilSunday = (7 - day) % 7;
+  const sunday = new Date(today);
+  sunday.setDate(today.getDate() + untilSunday);
+  return toISODate(sunday);
+}
+
+function formatDayLabel(iso) {
+  return fromISODate(iso).toLocaleDateString('en-NZ', { day: 'numeric', month: 'short' });
+}
+
+function formatWeekEndingLabel(iso) {
+  return fromISODate(iso).toLocaleDateString('en-NZ', {
+    day: 'numeric',
+    month: 'short',
+    year: 'numeric',
+  });
+}
+
+function makeId() {
+  return Math.random().toString(36).slice(2, 10);
+}
+
+function blankJobEntry() {
+  return { id: makeId(), jobName: '', hours: '', notes: '' };
+}
+
+function blankDay() {
+  return { type: 'work', start: '', end: '', lunch: '', leaveHours: '', jobs: [blankJobEntry()] };
+}
+
+function blankDays() {
+  const obj = {};
+  DAY_KEYS.forEach((k) => {
+    obj[k] = blankDay();
+  });
+  return obj;
+}
+
+function toHours(v) {
+  const n = parseFloat(v);
+  return isNaN(n) ? 0 : n;
+}
+
+function calcDayHours(day) {
+  if (!day) return 0;
+  const type = day.type || 'work';
+  if (type !== 'work') {
+    return toHours(day.leaveHours);
+  }
+  if (!day.start || !day.end) return 0;
+  const [sh, sm] = day.start.split(':').map(Number);
+  const [eh, em] = day.end.split(':').map(Number);
+  const startM = sh * 60 + sm;
+  let endM = eh * 60 + em;
+  if (endM < startM) endM += 24 * 60;
+  const lunch = Number(day.lunch) || 0;
+  let total = endM - startM - lunch;
+  if (total < 0) total = 0;
+  return total / 60;
+}
+
+function calcAllocated(day) {
+  if (!day || !Array.isArray(day.jobs)) return 0;
+  return day.jobs.reduce((sum, j) => sum + toHours(j.hours), 0);
+}
+
+function formatHours(h) {
+  return (h || 0).toFixed(2);
+}
+
+// ============================================================
+// JobSelect - native dropdown job picker with inline "add new"
+// ============================================================
+function JobSelect({ value, onChange, jobs, onAddJob }) {
+  const [adding, setAdding] = useState(false);
+  const [newName, setNewName] = useState('');
+  const inputRef = useRef(null);
+
+  useEffect(() => {
+    if (adding && inputRef.current) {
+      inputRef.current.focus();
+    }
+  }, [adding]);
+
+  const sortedJobs = [...jobs].sort((a, b) => a.localeCompare(b));
+  const optionsToShow =
+    value && !sortedJobs.includes(value) ? [value, ...sortedJobs] : sortedJobs;
+
+  const handleSelectChange = (e) => {
+    const v = e.target.value;
+    if (v === '__add_new__') {
+      setNewName('');
+      setAdding(true);
+      return;
+    }
+    onChange(v);
+  };
+
+  const commitNew = () => {
+    const trimmed = newName.trim();
+    if (!trimmed) {
+      setAdding(false);
+      return;
+    }
+    onAddJob(trimmed);
+    onChange(trimmed);
+    setAdding(false);
+    setNewName('');
+  };
+
+  const cancelNew = () => {
+    setAdding(false);
+    setNewName('');
+  };
+
+  if (adding) {
+    return (
+      <div className="flex items-center gap-1">
+        <input
+          ref={inputRef}
+          type="text"
+          value={newName}
+          onChange={(e) => setNewName(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              e.preventDefault();
+              commitNew();
+            } else if (e.key === 'Escape') {
+              cancelNew();
+            }
+          }}
+          placeholder="New job name"
+          className="w-full bg-stone-50 border border-amber-500 rounded-md px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-amber-600"
+        />
+        <button
+          type="button"
+          onClick={commitNew}
+          aria-label="Save new job"
+          className="p-1.5 rounded text-amber-700 hover:bg-amber-50 shrink-0"
+        >
+          <Check className="w-4 h-4" />
+        </button>
+        <button
+          type="button"
+          onClick={cancelNew}
+          aria-label="Cancel"
+          className="p-1.5 rounded text-stone-400 hover:bg-stone-100 shrink-0"
+        >
+          <X className="w-4 h-4" />
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="relative">
+      <select
+        value={value || ''}
+        onChange={handleSelectChange}
+        className="w-full appearance-none bg-stone-50 border border-stone-300 rounded-md pl-2 pr-7 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-amber-600 text-stone-800"
+      >
+        <option value="" disabled>
+          Select a job
+        </option>
+        {optionsToShow.map((j) => (
+          <option key={j} value={j}>
+            {j}
+          </option>
+        ))}
+        <option value="__add_new__">+ Add new job…</option>
+      </select>
+      <ChevronDown className="w-4 h-4 text-stone-400 absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none" />
+    </div>
+  );
+}
+
+// ============================================================
+// JobRow - one job + hours line, with notes and "use remaining"
+// ============================================================
+function JobRow({
+  entry,
+  jobs,
+  onAddJob,
+  onChangeJob,
+  onChangeHours,
+  onChangeNotes,
+  onRemove,
+  showRemove,
+  remaining,
+}) {
+  const [showNotes, setShowNotes] = useState(false);
+  const notesRef = useRef(null);
+  const currentHours = toHours(entry.hours);
+  const showFill =
+    remaining !== null && remaining > 0.004 && Math.abs(currentHours - remaining) > 0.004;
+  const hasNotes = !!(entry.notes && entry.notes.trim());
+
+  useEffect(() => {
+    if (showNotes && notesRef.current) {
+      notesRef.current.focus();
+    }
+  }, [showNotes]);
+
+  return (
+    <div className="px-4 py-2.5">
+      <div className="flex items-center gap-2">
+        <div className="flex-1 min-w-0">
+          <JobSelect
+            value={entry.jobName}
+            onChange={(v) => onChangeJob(entry.id, v)}
+            jobs={jobs}
+            onAddJob={onAddJob}
+          />
+        </div>
+        <input
+          type="number"
+          inputMode="decimal"
+          step="0.25"
+          min="0"
+          value={entry.hours}
+          onChange={(e) => onChangeHours(entry.id, e.target.value)}
+          placeholder="0"
+          className="w-20 shrink-0 bg-stone-50 border border-stone-300 rounded-md px-2 py-1.5 text-sm text-right tabular-nums focus:outline-none focus:ring-2 focus:ring-amber-600"
+        />
+        {showRemove ? (
+          <button
+            type="button"
+            onClick={onRemove}
+            aria-label="Remove job"
+            className="p-1.5 rounded text-stone-400 hover:text-red-600 hover:bg-red-50 shrink-0"
+          >
+            <Trash2 className="w-4 h-4" />
+          </button>
+        ) : (
+          <div className="w-7 shrink-0" aria-hidden="true" />
+        )}
+      </div>
+      <div className="flex items-center justify-between gap-2 mt-1">
+        <button
+          type="button"
+          onClick={() => setShowNotes((s) => !s)}
+          className={`flex items-center gap-1 text-xs ${
+            hasNotes ? 'text-amber-700' : 'text-stone-400'
+          } hover:text-amber-700`}
+        >
+          <FileText className="w-3.5 h-3.5" />
+          Notes
+        </button>
+        {showFill && (
+          <button
+            type="button"
+            onClick={() => onChangeHours(entry.id, remaining.toFixed(2))}
+            className="text-xs text-amber-700 hover:underline"
+          >
+            Use remaining {remaining.toFixed(2)}h
+          </button>
+        )}
+      </div>
+      {showNotes && (
+        <textarea
+          ref={notesRef}
+          value={entry.notes || ''}
+          onChange={(e) => onChangeNotes(entry.id, e.target.value)}
+          placeholder="Add notes for this job…"
+          rows={2}
+          className="mt-2 w-full bg-stone-50 border border-stone-300 rounded-md px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-amber-600 resize-none"
+        />
+      )}
+    </div>
+  );
+}
+
+// ============================================================
+// AuthGate - email/password sign in, wraps the timesheet app
+// ============================================================
+function friendlyError(code) {
+  const map = {
+    'auth/invalid-email': 'That email address looks off.',
+    'auth/user-not-found': 'No account with that email - try signing up instead.',
+    'auth/wrong-password': 'Wrong password, try again.',
+    'auth/invalid-credential': 'Email or password is incorrect.',
+    'auth/email-already-in-use': 'An account already exists for that email - try signing in.',
+    'auth/weak-password': 'Password should be at least 6 characters.',
+    'auth/too-many-requests': 'Too many attempts - wait a bit and try again.',
+  };
+  return map[code] || 'Something went wrong. Please try again.';
+}
+
+function AuthGate() {
+  const [user, setUser] = useState(undefined); // undefined = checking, null = signed out
+  const [mode, setMode] = useState('signin');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [resetSent, setResetSent] = useState(false);
+
+  useEffect(() => {
+    const unsub = auth.onAuthStateChanged((u) => {
+      if (u) {
+        window.storage = makeStorage(u.uid);
+      }
+      setUser(u);
+    });
+    return unsub;
+  }, []);
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    setError('');
+    setResetSent(false);
+    setBusy(true);
+    try {
+      if (mode === 'signin') {
+        await auth.signInWithEmailAndPassword(email.trim(), password);
+      } else {
+        await auth.createUserWithEmailAndPassword(email.trim(), password);
+      }
+    } catch (err) {
+      setError(friendlyError(err.code));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleReset = async () => {
+    if (!email.trim()) {
+      setError('Enter your email above first, then tap "Forgot password".');
+      return;
+    }
+    setError('');
+    setBusy(true);
+    try {
+      await auth.sendPasswordResetEmail(email.trim());
+      setResetSent(true);
+    } catch (err) {
+      setError(friendlyError(err.code));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (user === undefined) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-stone-100">
+        <Loader2 className="w-6 h-6 animate-spin text-stone-400" />
+      </div>
+    );
+  }
+
+  if (user) {
+    return <TimesheetApp onLogout={() => auth.signOut()} />;
+  }
+
+  return (
+    <div className="min-h-screen flex items-center justify-center bg-stone-100 px-4 font-sans">
+      <div className="w-full max-w-sm bg-white border border-stone-300 rounded-lg p-6">
+        <h1 className="text-lg font-bold text-stone-900 mb-1">Time Sheet</h1>
+        <p className="text-sm text-stone-500 mb-4">
+          {mode === 'signin' ? 'Sign in to your timesheet.' : 'Create an account to get started.'}
+        </p>
+        <form onSubmit={handleSubmit} className="space-y-3">
+          <div>
+            <label className="block text-xs font-medium text-stone-500 mb-1">Email</label>
+            <input
+              type="email"
+              required
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              autoComplete="email"
+              className="w-full bg-stone-50 border border-stone-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-amber-600"
+            />
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-stone-500 mb-1">Password</label>
+            <input
+              type="password"
+              required
+              minLength={6}
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              autoComplete={mode === 'signin' ? 'current-password' : 'new-password'}
+              className="w-full bg-stone-50 border border-stone-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-amber-600"
+            />
+          </div>
+          {error && <p className="text-xs text-red-600">{error}</p>}
+          {resetSent && (
+            <p className="text-xs text-emerald-700">
+              Password reset email sent - check your inbox.
+            </p>
+          )}
+          <button
+            type="submit"
+            disabled={busy}
+            className="w-full bg-amber-700 hover:bg-amber-800 disabled:opacity-60 text-white font-medium py-2.5 rounded-md text-sm"
+          >
+            {busy ? 'Please wait…' : mode === 'signin' ? 'Sign in' : 'Create account'}
+          </button>
+        </form>
+        <div className="flex items-center justify-between mt-4 text-xs">
+          <button
+            type="button"
+            onClick={() => {
+              setMode((m) => (m === 'signin' ? 'signup' : 'signin'));
+              setError('');
+              setResetSent(false);
+            }}
+            className="text-amber-700 hover:underline"
+          >
+            {mode === 'signin' ? 'Need an account? Sign up' : 'Have an account? Sign in'}
+          </button>
+          {mode === 'signin' && (
+            <button type="button" onClick={handleReset} className="text-stone-500 hover:underline">
+              Forgot password?
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
+// TimesheetApp - the main app (unchanged from the Claude artifact)
+// ============================================================
+function TimesheetApp({ onLogout }) {
+  const [weekEnding, setWeekEnding] = useState(getDefaultWeekEnding());
+  const [name, setName] = useState('Leon');
+  const [days, setDays] = useState(blankDays());
+  const [jobs, setJobs] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [saveState, setSaveState] = useState('idle');
+  const [copyState, setCopyState] = useState('idle');
+  const [showJobsPanel, setShowJobsPanel] = useState(false);
+  const [newJobInput, setNewJobInput] = useState('');
+
+  const saveTimer = useRef(null);
+  const profileReady = useRef(false);
+  const jobsReady = useRef(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await window.storage.get('profile');
+        if (!cancelled && res && res.value) {
+          const parsed = JSON.parse(res.value);
+          if (parsed.name) setName(parsed.name);
+        }
+      } catch (e) {
+        // no profile saved yet
+      } finally {
+        if (!cancelled) profileReady.current = true;
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await window.storage.get('jobs');
+        if (!cancelled && res && res.value) {
+          const parsed = JSON.parse(res.value);
+          if (Array.isArray(parsed)) setJobs(parsed);
+        }
+      } catch (e) {
+        // no jobs saved yet
+      } finally {
+        if (!cancelled) jobsReady.current = true;
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    (async () => {
+      try {
+        const res = await window.storage.get(`week:${weekEnding}`);
+        if (cancelled) return;
+        const loaded = res && res.value ? JSON.parse(res.value) : null;
+        const loadedDays = loaded && loaded.days;
+        const valid =
+          loadedDays && DAY_KEYS.every((k) => loadedDays[k] && Array.isArray(loadedDays[k].jobs));
+        setDays(valid ? loadedDays : blankDays());
+      } catch (e) {
+        if (!cancelled) setDays(blankDays());
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [weekEnding]);
+
+  useEffect(() => {
+    if (loading) return;
+    setSaveState('saving');
+    if (saveTimer.current) clearTimeout(saveTimer.current);
+    saveTimer.current = setTimeout(async () => {
+      try {
+        await window.storage.set(`week:${weekEnding}`, JSON.stringify({ days }));
+        setSaveState('saved');
+        setTimeout(() => {
+          setSaveState((s) => (s === 'saved' ? 'idle' : s));
+        }, 2000);
+      } catch (e) {
+        setSaveState('idle');
+      }
+    }, 600);
+    return () => clearTimeout(saveTimer.current);
+  }, [days, weekEnding, loading]);
+
+  useEffect(() => {
+    if (!profileReady.current) return;
+    const t = setTimeout(async () => {
+      try {
+        await window.storage.set('profile', JSON.stringify({ name }));
+      } catch (e) {
+        // ignore
+      }
+    }, 600);
+    return () => clearTimeout(t);
+  }, [name]);
+
+  useEffect(() => {
+    if (!jobsReady.current) return;
+    const t = setTimeout(async () => {
+      try {
+        await window.storage.set('jobs', JSON.stringify(jobs));
+      } catch (e) {
+        // ignore
+      }
+    }, 500);
+    return () => clearTimeout(t);
+  }, [jobs]);
+
+  const updateDayField = (dayKey, field, value) => {
+    setDays((prev) => ({ ...prev, [dayKey]: { ...prev[dayKey], [field]: value } }));
+  };
+
+  const updateJobRow = (dayKey, id, field, value) => {
+    setDays((prev) => ({
+      ...prev,
+      [dayKey]: {
+        ...prev[dayKey],
+        jobs: prev[dayKey].jobs.map((j) => (j.id === id ? { ...j, [field]: value } : j)),
+      },
+    }));
+  };
+
+  const handleJobNameChange = (dayKey, id, value) => {
+    setDays((prev) => {
+      const dayJobs = prev[dayKey].jobs;
+      const isLast = dayJobs.length > 0 && dayJobs[dayJobs.length - 1].id === id;
+      const updatedJobs = dayJobs.map((j) => (j.id === id ? { ...j, jobName: value } : j));
+      const finalJobs = isLast && value.trim() ? [...updatedJobs, blankJobEntry()] : updatedJobs;
+      return { ...prev, [dayKey]: { ...prev[dayKey], jobs: finalJobs } };
+    });
+  };
+
+  const addJobRow = (dayKey) => {
+    setDays((prev) => ({
+      ...prev,
+      [dayKey]: { ...prev[dayKey], jobs: [...prev[dayKey].jobs, blankJobEntry()] },
+    }));
+  };
+
+  const removeJobRow = (dayKey, id) => {
+    setDays((prev) => ({
+      ...prev,
+      [dayKey]: { ...prev[dayKey], jobs: prev[dayKey].jobs.filter((j) => j.id !== id) },
+    }));
+  };
+
+  const addJob = (jobName) => {
+    const trimmed = jobName.trim();
+    if (!trimmed) return;
+    setJobs((prev) => {
+      if (prev.some((j) => j.toLowerCase() === trimmed.toLowerCase())) return prev;
+      return [...prev, trimmed];
+    });
+  };
+
+  const removeJob = (jobName) => {
+    setJobs((prev) => prev.filter((j) => j !== jobName));
+  };
+
+  const handleAddJobFromPanel = () => {
+    if (!newJobInput.trim()) return;
+    addJob(newJobInput);
+    setNewJobInput('');
+  };
+
+  const dayTotal = (dayKey) => calcDayHours(days[dayKey]);
+  const weekTotal = DAY_KEYS.reduce((sum, k) => sum + dayTotal(k), 0);
+
+  const goPrevWeek = () => setWeekEnding((p) => addDays(p, -7));
+  const goNextWeek = () => setWeekEnding((p) => addDays(p, 7));
+
+  const copySummary = async () => {
+    const lines = [];
+    lines.push('TIME SHEET');
+    lines.push(`Name: ${name || '-'}`);
+    lines.push(`Week ending (Sunday): ${formatWeekEndingLabel(weekEnding)}`);
+    lines.push('');
+    DAY_KEYS.forEach((k) => {
+      const day = days[k];
+      const dayType = day.type || 'work';
+      const total = calcDayHours(day);
+      const dateLabel = formatDayLabel(addDays(weekEnding, DAY_OFFSET[k]));
+      lines.push(`${DAY_LABELS[k]} (${dateLabel})`);
+      if (dayType === 'sick') {
+        lines.push(`  Sick leave: ${formatHours(total)}h`);
+      } else if (dayType === 'annual') {
+        lines.push(`  Annual leave: ${formatHours(total)}h`);
+      } else if (day.start && day.end) {
+        lines.push(`  ${day.start}-${day.end} (lunch ${day.lunch || 0}m) = ${formatHours(total)}h`);
+        const filledJobs = day.jobs.filter((j) => j.jobName || j.hours || j.notes);
+        filledJobs.forEach((j) => {
+          lines.push(`    ${j.jobName || '(unnamed job)'}: ${formatHours(toHours(j.hours))}h`);
+          if (j.notes && j.notes.trim()) {
+            lines.push(`      Note: ${j.notes.trim()}`);
+          }
+        });
+      } else {
+        lines.push('  -');
+      }
+      lines.push('');
+    });
+    lines.push(`TOTAL HOURS FOR WEEK: ${formatHours(weekTotal)}h`);
+    const text = lines.join('\n');
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopyState('copied');
+      setTimeout(() => setCopyState('idle'), 2000);
+    } catch (e) {
+      try {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.focus();
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+        setCopyState('copied');
+        setTimeout(() => setCopyState('idle'), 2000);
+      } catch (err) {
+        // clipboard unavailable, give up quietly
+      }
+    }
+  };
+
+  const sortedJobsForPanel = [...jobs].sort((a, b) => a.localeCompare(b));
+
+  const handlePrint = () => {
+    try {
+      const doc = new window.jspdf.jsPDF();
+      doc.setFontSize(16);
+      doc.text('Time Sheet', 14, 16);
+      doc.setFontSize(10);
+      doc.text(`Name: ${name || '-'}`, 14, 24);
+      doc.text(`Week ending (Sunday): ${formatWeekEndingLabel(weekEnding)}`, 14, 30);
+
+      const body = DAY_KEYS.map((k) => {
+        const day = days[k];
+        const dayType = day.type || 'work';
+        const total = dayTotal(k);
+        const dateForDay = addDays(weekEnding, DAY_OFFSET[k]);
+        let details;
+        if (dayType === 'sick') {
+          details = 'Sick leave';
+        } else if (dayType === 'annual') {
+          details = 'Annual leave';
+        } else if (day.start && day.end) {
+          const detailLines = [`${day.start}-${day.end} (lunch ${day.lunch || 0}m)`];
+          day.jobs
+            .filter((j) => j.jobName || j.hours)
+            .forEach((j) => {
+              detailLines.push(`  ${j.jobName || '(unnamed job)'}: ${formatHours(toHours(j.hours))}h`);
+            });
+          details = detailLines.join('\n');
+        } else {
+          details = '-';
+        }
+        return [DAY_LABELS[k], formatDayLabel(dateForDay), details, `${formatHours(total)}h`];
+      });
+
+      doc.autoTable({
+        startY: 36,
+        head: [['Day', 'Date', 'Details', 'Hours']],
+        body: body,
+        foot: [['', '', 'Total hours for week', `${formatHours(weekTotal)}h`]],
+        styles: { fontSize: 9, cellPadding: 2, valign: 'top' },
+        headStyles: { fillColor: [180, 83, 9] },
+        footStyles: { fillColor: [245, 245, 244], textColor: [20, 20, 20], fontStyle: 'bold' },
+        columnStyles: { 2: { cellWidth: 80 } },
+      });
+
+      doc.save(`timesheet-${weekEnding}.pdf`);
+    } catch (e) {
+      console.error('PDF generation failed', e);
+      alert('Could not generate the PDF. Please try again.');
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-stone-100 font-sans">
+      <div className="max-w-2xl mx-auto min-h-screen flex flex-col bg-stone-100 print:hidden">
+        <div className="sticky top-0 z-10 bg-white border-b border-stone-300 px-4 pt-4 pb-3">
+          <div className="flex items-center justify-between mb-1">
+            <h1 className="text-lg font-bold tracking-tight text-stone-900">Time Sheet</h1>
+            <div className="flex items-center gap-3">
+              {saveState === 'saving' && (
+                <Loader2 className="w-4 h-4 animate-spin motion-reduce:animate-none text-stone-400" />
+              )}
+              {saveState === 'saved' && <span className="text-xs text-emerald-700">Saved</span>}
+              <span className="text-sm font-bold tabular-nums text-amber-700">
+                {formatHours(weekTotal)}h
+              </span>
+              <button
+                type="button"
+                onClick={onLogout}
+                className="text-xs text-stone-400 hover:text-stone-600 border-l border-stone-200 pl-3"
+              >
+                Log out
+              </button>
+            </div>
+          </div>
+          <p className="text-xs text-stone-500 mb-3">
+            Set start, end and lunch for the day, then split the hours across jobs below.
+          </p>
+          <div className="flex items-center gap-2 mb-3">
+            <label className="text-xs font-medium text-stone-500 w-12 shrink-0">Name</label>
+            <input
+              type="text"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="Your name"
+              className="flex-1 bg-white border border-stone-300 rounded-md px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-amber-600"
+            />
+          </div>
+          <div className="flex items-center justify-between bg-stone-50 border border-stone-300 rounded-md px-1 py-1">
+            <button
+              type="button"
+              onClick={goPrevWeek}
+              aria-label="Previous week"
+              className="p-2.5 rounded hover:bg-stone-200 active:bg-stone-300"
+            >
+              <ChevronLeft className="w-5 h-5 text-stone-600" />
+            </button>
+            <div className="text-center">
+              <div className="text-xs uppercase tracking-wide text-stone-500 font-medium">
+                Week ending (Sun)
+              </div>
+              <div className="text-sm font-semibold text-stone-800">
+                {formatWeekEndingLabel(weekEnding)}
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={goNextWeek}
+              aria-label="Next week"
+              className="p-2.5 rounded hover:bg-stone-200 active:bg-stone-300"
+            >
+              <ChevronRight className="w-5 h-5 text-stone-600" />
+            </button>
+          </div>
+        </div>
+
+        <div className="flex-1">
+          {loading ? (
+            <div className="flex items-center justify-center py-20 text-stone-500 text-sm">
+              <Loader2 className="w-5 h-5 animate-spin motion-reduce:animate-none mr-2" />
+              Loading week…
+            </div>
+          ) : (
+            <div className="px-4 py-4 space-y-4">
+              <div className="bg-white border border-stone-300 rounded-lg overflow-hidden">
+                <button
+                  type="button"
+                  onClick={() => setShowJobsPanel((s) => !s)}
+                  className="w-full flex items-center justify-between px-4 py-3"
+                >
+                  <span className="text-sm font-semibold text-stone-900">Jobs ({jobs.length})</span>
+                  <ChevronDown
+                    className={`w-4 h-4 text-stone-500 transition-transform duration-200 ${
+                      showJobsPanel ? 'rotate-180' : ''
+                    }`}
+                  />
+                </button>
+                {showJobsPanel && (
+                  <div className="px-4 pb-4 pt-1 border-t border-stone-100 space-y-1">
+                    <div className="flex gap-1.5 py-2">
+                      <input
+                        type="text"
+                        value={newJobInput}
+                        onChange={(e) => setNewJobInput(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            e.preventDefault();
+                            handleAddJobFromPanel();
+                          }
+                        }}
+                        placeholder="New job name"
+                        className="flex-1 bg-stone-50 border border-stone-300 rounded-md px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-amber-600"
+                      />
+                      <button
+                        type="button"
+                        onClick={handleAddJobFromPanel}
+                        className="px-3 rounded-md bg-amber-700 hover:bg-amber-800 text-white text-sm font-medium"
+                      >
+                        Add
+                      </button>
+                    </div>
+                    {sortedJobsForPanel.length === 0 ? (
+                      <p className="text-xs text-stone-500 px-1 pb-1">
+                        No jobs saved yet — add one above, or pick "+ Add new job" from any
+                        day's dropdown below.
+                      </p>
+                    ) : (
+                      sortedJobsForPanel.map((j) => (
+                        <div
+                          key={j}
+                          className="flex items-center justify-between px-2 py-1.5 rounded hover:bg-stone-50"
+                        >
+                          <span className="text-sm text-stone-800">{j}</span>
+                          <button
+                            type="button"
+                            onClick={() => removeJob(j)}
+                            aria-label={`Remove ${j}`}
+                            className="p-1 rounded text-stone-400 hover:text-red-600 hover:bg-red-50"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                )}
+              </div>
+
+              {DAY_KEYS.map((k) => {
+                const day = days[k];
+                const dayType = day.type || 'work';
+                const dateForDay = addDays(weekEnding, DAY_OFFSET[k]);
+                const total = dayTotal(k);
+                const allocated = calcAllocated(day);
+                const diff = total - allocated;
+                const balanced = total > 0 && Math.abs(diff) < 0.01;
+                const overAllocated = total > 0 && diff < -0.01;
+
+                return (
+                  <div key={k} className="bg-white border border-stone-300 rounded-lg overflow-hidden">
+                    <div className="flex items-center justify-between px-4 py-3 bg-stone-50 border-b border-stone-200">
+                      <div>
+                        <div className="font-semibold text-stone-900">{DAY_LABELS[k]}</div>
+                        <div className="text-xs text-stone-500">{formatDayLabel(dateForDay)}</div>
+                      </div>
+                      <div className="text-right">
+                        <div className="text-xs text-stone-500">Day total</div>
+                        <div className="font-semibold tabular-nums text-amber-700">
+                          {formatHours(total)}h
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="flex gap-1.5 px-4 py-3 border-b border-stone-100">
+                      {['work', 'sick', 'annual'].map((t) => (
+                        <button
+                          key={t}
+                          type="button"
+                          onClick={() => updateDayField(k, 'type', t)}
+                          className={`flex-1 text-xs font-medium py-1.5 rounded-md border transition-colors ${
+                            dayType === t
+                              ? 'bg-amber-700 text-white border-amber-700'
+                              : 'bg-stone-50 text-stone-600 border-stone-300 hover:bg-stone-100'
+                          }`}
+                        >
+                          {t === 'work' ? 'Worked' : t === 'sick' ? 'Sick leave' : 'Annual leave'}
+                        </button>
+                      ))}
+                    </div>
+
+                    {dayType !== 'work' ? (
+                      <div className="px-4 py-3 border-b border-stone-100">
+                        <div className="flex items-center gap-3">
+                          <label className="text-xs font-medium text-stone-500 w-24 shrink-0">
+                            Hours
+                          </label>
+                          <input
+                            type="number"
+                            inputMode="decimal"
+                            step="0.25"
+                            min="0"
+                            value={day.leaveHours}
+                            onChange={(e) => updateDayField(k, 'leaveHours', e.target.value)}
+                            placeholder="0"
+                            className="box-border w-24 bg-stone-50 border border-stone-300 rounded-md px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-amber-600"
+                          />
+                        </div>
+                      </div>
+                    ) : (
+                      <>
+                        <div className="px-4 py-3 border-b border-stone-100 space-y-2.5">
+                          <div className="flex items-center gap-3">
+                            <label className="text-xs font-medium text-stone-500 w-24 shrink-0">Start</label>
+                            <div className="relative w-32">
+                              <Clock className="w-4 h-4 text-stone-400 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                              <input
+                                type="time"
+                                value={day.start}
+                                onChange={(e) => updateDayField(k, 'start', e.target.value)}
+                                className="box-border w-full bg-stone-50 border border-stone-300 rounded-md pl-8 pr-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-amber-600"
+                              />
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-3">
+                            <label className="text-xs font-medium text-stone-500 w-24 shrink-0">End</label>
+                            <div className="relative w-32">
+                              <Clock className="w-4 h-4 text-stone-400 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                              <input
+                                type="time"
+                                value={day.end}
+                                onChange={(e) => updateDayField(k, 'end', e.target.value)}
+                                className="box-border w-full bg-stone-50 border border-stone-300 rounded-md pl-8 pr-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-amber-600"
+                              />
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-3">
+                            <label className="text-xs font-medium text-stone-500 w-24 shrink-0">Lunch (min)</label>
+                            <input
+                              type="number"
+                              inputMode="numeric"
+                              min="0"
+                              step="5"
+                              value={day.lunch}
+                              onChange={(e) => updateDayField(k, 'lunch', e.target.value)}
+                              placeholder="0"
+                              className="box-border w-20 bg-stone-50 border border-stone-300 rounded-md px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-amber-600"
+                            />
+                          </div>
+                        </div>
+
+                        {total > 0 && (
+                          <div className="px-4 py-2 border-b border-stone-100">
+                            {balanced ? (
+                              <span className="flex items-center gap-1 text-xs text-emerald-700">
+                                <Check className="w-3.5 h-3.5" />
+                                Allocated {formatHours(allocated)}h of {formatHours(total)}h
+                              </span>
+                            ) : overAllocated ? (
+                              <span className="text-xs text-red-600">
+                                {formatHours(Math.abs(diff))}h over-allocated — job hours add up to
+                                more than the day total
+                              </span>
+                            ) : (
+                              <span className="text-xs text-stone-500">
+                                {formatHours(diff)}h not yet allocated to a job
+                              </span>
+                            )}
+                          </div>
+                        )}
+
+                        <div className="px-4 pt-2 pb-1 flex items-center gap-2 text-xs font-medium text-stone-500">
+                          <span className="flex-1">Job</span>
+                          <span className="w-20 shrink-0 text-right">Hours</span>
+                          <span className="w-7 shrink-0" />
+                        </div>
+                        <div className="divide-y divide-stone-100">
+                          {day.jobs.map((entry) => {
+                            const otherSum = day.jobs
+                              .filter((j) => j.id !== entry.id)
+                              .reduce((s, j) => s + toHours(j.hours), 0);
+                            const target = total - otherSum;
+                            return (
+                              <JobRow
+                                key={entry.id}
+                                entry={entry}
+                                jobs={jobs}
+                                onAddJob={addJob}
+                                onChangeJob={(id, v) => handleJobNameChange(k, id, v)}
+                                onChangeHours={(id, v) => updateJobRow(k, id, 'hours', v)}
+                                onChangeNotes={(id, v) => updateJobRow(k, id, 'notes', v)}
+                                onRemove={() => removeJobRow(k, entry.id)}
+                                showRemove={day.jobs.length > 1}
+                                remaining={total > 0 ? target : null}
+                              />
+                            );
+                          })}
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => addJobRow(k)}
+                          className="w-full flex items-center justify-center gap-1.5 py-2.5 text-sm font-medium text-amber-700 hover:bg-amber-50 active:bg-amber-100 transition-colors"
+                        >
+                          <Plus className="w-4 h-4" />
+                          Add job
+                        </button>
+                      </>
+                    )}
+                    <div className="flex items-center justify-between px-4 py-2.5 bg-stone-50 border-t border-stone-200">
+                      <span className="text-xs font-medium text-stone-500 uppercase tracking-wide">
+                        Day total
+                      </span>
+                      <span className="font-semibold tabular-nums text-amber-700">
+                        {formatHours(total)}h
+                      </span>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+
+        <div className="bg-white border-t border-stone-300 px-4 py-3 flex items-center justify-between gap-3">
+          <div>
+            <div className="text-xs text-stone-500 uppercase tracking-wide">Total for week</div>
+            <div className="text-2xl font-bold tabular-nums text-stone-900">
+              {formatHours(weekTotal)}
+              <span className="text-base font-medium text-stone-400">h</span>
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={handlePrint}
+              aria-label="Download timesheet as PDF"
+              className="p-2.5 rounded-md border border-stone-300 text-stone-600 hover:bg-stone-50"
+            >
+              <Printer className="w-4 h-4" />
+            </button>
+            <button
+              type="button"
+              onClick={copySummary}
+              className="flex items-center gap-2 bg-amber-700 hover:bg-amber-800 active:bg-amber-900 text-white font-medium px-4 py-2.5 rounded-md text-sm transition-colors"
+            >
+              {copyState === 'copied' ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
+              {copyState === 'copied' ? 'Copied' : 'Copy summary'}
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div className="hidden print:block p-8 text-black">
+        <h1 className="text-2xl font-bold mb-1">Time Sheet</h1>
+        <div className="mb-4 text-sm">
+          <div>Name: {name || '-'}</div>
+          <div>Week ending (Sunday): {formatWeekEndingLabel(weekEnding)}</div>
+        </div>
+        <table className="w-full text-sm border-collapse">
+          <thead>
+            <tr className="border-b-2 border-black">
+              <th className="text-left py-1 pr-2">Day</th>
+              <th className="text-left py-1 pr-2">Date</th>
+              <th className="text-left py-1 pr-2">Details</th>
+              <th className="text-right py-1">Hours</th>
+            </tr>
+          </thead>
+          <tbody>
+            {DAY_KEYS.map((k) => {
+              const day = days[k];
+              const dayType = day.type || 'work';
+              const total = dayTotal(k);
+              const dateForDay = addDays(weekEnding, DAY_OFFSET[k]);
+              return (
+                <tr key={k} className="border-b border-stone-300">
+                  <td className="py-1.5 pr-2 align-top font-medium">{DAY_LABELS[k]}</td>
+                  <td className="py-1.5 pr-2 align-top">{formatDayLabel(dateForDay)}</td>
+                  <td className="py-1.5 pr-2 align-top">
+                    {dayType === 'sick' ? (
+                      'Sick leave'
+                    ) : dayType === 'annual' ? (
+                      'Annual leave'
+                    ) : day.start && day.end ? (
+                      <>
+                        {day.start}{'\u2013'}{day.end} (lunch {day.lunch || 0}m)
+                        {day.jobs
+                          .filter((j) => j.jobName || j.hours)
+                          .map((j) => (
+                            <div key={j.id} className="text-xs text-stone-600">
+                              {j.jobName || '(unnamed job)'}: {formatHours(toHours(j.hours))}h
+                            </div>
+                          ))}
+                      </>
+                    ) : (
+                      '-'
+                    )}
+                  </td>
+                  <td className="py-1.5 text-right align-top">{formatHours(total)}h</td>
+                </tr>
+              );
+            })}
+            <tr className="border-t-2 border-black font-bold">
+              <td colSpan="3" className="py-2 text-right pr-2">
+                Total hours for week
+              </td>
+              <td className="py-2 text-right">{formatHours(weekTotal)}h</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
+// Render
+// ============================================================
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(<AuthGate />);
+  </script>
+</body>
+</html>
